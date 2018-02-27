@@ -10,20 +10,26 @@ import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.kstream.ForeachAction;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.KStreamBuilder;
 import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.processor.WallclockTimestampExtractor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.ayannah.bigquery.BigQueryDao;
+import com.ayannah.kafkastream.utils.Configuration;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
 
 import nl.amis.streams.JsonPOJODeserializer;
 import nl.amis.streams.JsonPOJOSerializer;
 
 
 
-/**
- * Hello world!
- *
- */
+
 public class App 
 {
     
@@ -48,10 +54,17 @@ public class App
 	
 	private static final String APP_ID = "countries-streaming-analysis-app";
 	
+	private static Configuration configuration = new Configuration(System.getProperty("environment", "test"));
+	private static Logger logger = LoggerFactory.getLogger(App.class);
+	
 	public static void main( String[] args )
     {
-		System.out.println("Kafka Streams Demonstration");
-		 
+		logger.info("Kafka Streams Demonstration");
+		logger.info("Environment is "+configuration.getEnvironment().getLabel());
+		
+		logger.debug("Kafka Host: " + configuration.getConfiguration("kafka.host"));
+		logger.debug("Kafka Port: " + configuration.getConfiguration("kafka.port"));
+		
         // Create an instance of StreamsConfig from the Properties instance
         StreamsConfig config = new StreamsConfig(getProperties());
         final Serde < String > stringSerde = Serdes.String();
@@ -68,37 +81,65 @@ public class App
         countryMessageDeserializer.configure(serdeProps, false);
         final Serde < CountryMessage > countryMessageSerde = Serdes.serdeFrom(countryMessageSerializer, countryMessageDeserializer);
  
-     // building Kafka Streams Model
+        // building Kafka Streams Model
         KStreamBuilder kStreamBuilder = new KStreamBuilder();
         // the source of the streaming analysis is the topic with country messages
         KStream<String, CountryMessage> countriesStream = 
                                        kStreamBuilder.stream(stringSerde, countryMessageSerde, "countries1");
 
+        
+        countriesStream.foreach(new ForeachAction<String, CountryMessage>() {
+            
+			public void apply(String arg0, CountryMessage countryMessage) {
+				System.out.println(countryMessage.name);
+				System.out.println(countryMessage.code);
+				System.out.println(countryMessage.population);
+				System.out.println(countryMessage.size);
+				
+				ObjectWriter ow = new ObjectMapper().writer().withDefaultPrettyPrinter();
+				try {
+					String json = ow.writeValueAsString(countryMessage);
+					System.out.println(json);
+					BigQueryDao bigQueryDao = new BigQueryDao(configuration);
+					bigQueryDao.insert(json);
+				} catch (Exception e) {
+					// TODO Auto-generated catch block
+					e.printStackTrace();
+				}
+				
+			}
+         });
         // THIS IS THE CORE OF THE STREAMING ANALYTICS:
         // running count of countries per continent, published in topic RunningCountryCountPerContinent
         KTable<String,Long> runningCountriesCountPerContinent = countriesStream
-                                                                 .selectKey((k, country) -> country.continent)
-                                                                 .countByKey("Counts")
-                                                                 ;
+        														    .selectKey((k, country) -> country.continent)
+                                                                 .countByKey("Counts");
+        
         runningCountriesCountPerContinent.to(stringSerde, longSerde,  "RunningCountryCountPerContinent");
         runningCountriesCountPerContinent.print(stringSerde, longSerde);
  
+        
+        
  
  
-        System.out.println("Starting Kafka Streams Countries Example");
+        logger.info("Starting Kafka Streams Countries Example");
         KafkaStreams kafkaStreams = new KafkaStreams(kStreamBuilder, config);
         kafkaStreams.start();
-        System.out.println("Now started CountriesStreams Example");
+        logger.info("Now started CountriesStreams Example");
     }
+	
+	
 	
 	private static Properties getProperties() {
         Properties settings = new Properties();
         // Set a few key parameters
         settings.put(StreamsConfig.APPLICATION_ID_CONFIG, APP_ID);
         // Kafka bootstrap server (broker to talk to); ubuntu is the host name for my VM running Kafka, port 9092 is where the (single) broker listens 
-        settings.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "127.0.0.1:9092");
+        settings.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, configuration.getConfiguration("kafka.host") + ":" +
+        		configuration.getConfiguration("kafka.port"));
         // Apache ZooKeeper instance keeping watch over the Kafka cluster; ubuntu is the host name for my VM running Kafka, port 2181 is where the ZooKeeper listens 
-        settings.put(StreamsConfig.ZOOKEEPER_CONNECT_CONFIG, "127.0.0.1:2181");
+        settings.put(StreamsConfig.ZOOKEEPER_CONNECT_CONFIG, configuration.getConfiguration("zookeeper.host") + ":" +
+        		configuration.getConfiguration("zookeeper.port"));
         // default serdes for serialzing and deserializing key and value from and to streams in case no specific Serde is specified
         settings.put(StreamsConfig.KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
         settings.put(StreamsConfig.VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass().getName());
